@@ -8,15 +8,17 @@ class RandomNumberGenerator:
       - n_paths: number of Monte Carlo paths.
       - n_steps: number of time steps per path.
     """
-    def __init__(self, seed=None):
-        self.rng = np.random.default_rng(seed)
+    def __init__(self):
+        self.rng = None
 
-    def normals(self, n_paths, n_steps):
+    def normals(self, n_paths, n_steps, seed=2025):
         """Generate an array of shape (n_paths, n_steps) of standard normal variates."""
+        self.rng = np.random.default_rng(seed)
         return self.rng.standard_normal(size=(n_paths, n_steps))
 
-
-# In[5]:
+rng = RandomNumberGenerator()
+rng.normals(n_paths, n_steps)
+rng.normals(n_paths, n_steps)
 
 
 rng = RandomNumberGenerator(seed=42)
@@ -60,12 +62,10 @@ class PathGenerator:
         """
         dt = np.diff(times)
         n_paths, N = normals.shape
-        S_paths = np.empty((n_paths, N+1))
-        S_paths[:, 0] = self.S0
-        for i in range(N):
-            drift = (self.r - self.q - 0.5 * self.sigma**2) * dt[i]
-            diffusion = self.sigma * np.sqrt(dt[i]) * normals[:, i]
-            S_paths[:, i+1] = S_paths[:, i] * np.exp(drift + diffusion)
+        assert N == len(dt), "inconstitent size."
+        d_log_S = (self.r - self.q - 0.5 * self.sigma**2) * dt + self.sigma * np.sqrt(dt) * normals
+        S_paths = self.S0 * np.exp(np.cumsum(d_log_s))
+        S_paths = np.append([self.S0, S_paths])
         return S_paths
 
 
@@ -133,7 +133,6 @@ class PathInterpolator:
                 times_fine[idx] = t_j + (t_j1 - t_j) * (k / L)
                 idx += 1
         times_fine[idx] = times_coarse[-1]
-
         # For each fine time, find its coarse interval index j_k
         # since uniform, j_k = k//L
         S_fine = np.empty((n_paths, M * L + 1))
@@ -150,9 +149,6 @@ class PathInterpolator:
         # Last point
         S_fine[:, -1] = S_coarse[:, -1]
         return S_fine
-
-
-# In[10]:
 
 
 class PathInterpolator:
@@ -181,9 +177,6 @@ class PathInterpolator:
         return np.concatenate(full, axis=1)
 
 
-# In[20]:
-
-
 class DecrementIndex:
     """
     Computes the decrement index I_t from simulated stock paths.
@@ -193,8 +186,8 @@ class DecrementIndex:
                     I_{n-1} * (1 - delta1) * (S_n / S_{n-1} + q * dt)
                     - delta2)
     Inputs:
-      - delta1: percentage decrement (0 < delta1 < 1)
-      - delta2: point decrement (>0)
+      - delta1: percentage decrement (0 < delta1 < 1, 0.05)
+      - delta2: point decrement (>0, 0.01 * S0)
       - q: scalar dividend yield
       - dt: time step size (scalar)
       - I0: initial index level
@@ -281,7 +274,8 @@ class AutoCallable(Payoff):
     both subject to periodic up-and-out barriers on I_t.
     """
     def __init__(self, times_obs, coupon, barrier_up, barrier_ki, K_put):
-        self.times_obs = times_obs
+        self.times_obs = times_obs  # every 3 months, [0.25, 0.5, 0.75, 1.0], correspondingly, simulation times could be 1/252, 2/252, ..., 0.25, 0.25 + 1/252, ..., 0.5, ...
+                                                                                                                      #  5/252, 10/252, ..., 0.25, 0.25 + 5/252, ..., 0.5, ...
         self.coupon = coupon
         self.barrier_up = barrier_up
         self.barrier_ki = barrier_ki
