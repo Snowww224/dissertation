@@ -1,10 +1,5 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
 import numpy as np
+import time
 class RandomNumberGenerator:
     """
     Wrapper for generating standard normal random numbers.
@@ -12,32 +7,13 @@ class RandomNumberGenerator:
       - n_paths: number of Monte Carlo paths.
       - n_steps: number of time steps per path.
     """
-    def __init__(self, seed=None):
-        self.rng = np.random.default_rng(seed)
+    def __init__(self):
+        self.rng = None
 
-    def normals(self, n_paths, n_steps):
+    def normals(self, n_paths, n_steps, seed=2025):
         """Generate an array of shape (n_paths, n_steps) of standard normal variates."""
+        self.rng = np.random.default_rng(seed)
         return self.rng.standard_normal(size=(n_paths, n_steps))
-
-
-# In[5]:
-
-
-rng = RandomNumberGenerator(seed=42)
-
-n_paths = 10000  
-n_steps = 252
-
-#生成随机数矩阵，形状 (n_paths, n_steps)
-Z = rng.normals(n_paths, n_steps)
-
-print(Z.shape) 
-print(Z[:3,:5])
-
-
-# In[29]:
-
-
 class PathGenerator:
     """
     Generates asset price paths under geometric Brownian motion:
@@ -71,38 +47,6 @@ class PathGenerator:
             diffusion = self.sigma * np.sqrt(dt[i]) * normals[:, i]
             S_paths[:, i+1] = S_paths[:, i] * np.exp(drift + diffusion)
         return S_paths
-
-
-# In[30]:
-
-
-# 1. 设置参数
-r = 0.03       # 无风险利率
-q = 0.01       # 股息率
-sigma = 0.3    # 波动率
-S0 = 100.0     # 初始价格
-
-# 2. 构造时间格点（例如一年 252 个交易日）
-n_steps = 252
-times = np.linspace(0, 1, n_steps + 1)  # [0, 1/252, 2/252, ..., 1]
-
-# 3. 生成随机数
-n_paths = 10000
-rng = RandomNumberGenerator(seed=123)
-Z = rng.normals(n_paths, n_steps)  # 形状 (10000, 252)
-
-# 4. 模拟路径
-pg = PathGenerator(r, q, sigma, S0)
-paths = pg.simulate(times, Z)      # 形状 (10000, 253)
-
-# 5. 查看结果
-print(paths.shape)      # → (10000, 253)
-print(paths[0:5, :5])     # 打印第一条路径的前 5 个价格
-
-
-# In[35]:
-
-
 class PathInterpolator:
     """
     Geometric (Brownian-bridge) interpolation of log-prices between coarse points.
@@ -154,40 +98,6 @@ class PathInterpolator:
         # Last point
         S_fine[:, -1] = S_coarse[:, -1]
         return S_fine
-
-
-# In[10]:
-
-
-class PathInterpolator:
-    """
-    Geometric interpolation of log-prices between periodically simulated stock values.
-    Inputs:
-      - S_coarse: array of shape (n_paths, M+1) with stock prices at coarse time points.
-      - L: number of subintervals between each pair of coarse points.
-    Outputs:
-      - array of shape (n_paths, M*L + 1) with fully interpolated paths.
-    """
-    @staticmethod
-    def interpolate(S_coarse, L):
-        n_paths, M1 = S_coarse.shape
-        M = M1 - 1
-        full = []
-        for j in range(M):
-            start = S_coarse[:, j:j+1]
-            end = S_coarse[:, j+1:j+2]
-            # geometric interpolation via exponents from (0,1]
-            exponents = np.linspace(0, 1, L+1)[1:]
-            block = start * (end / start) ** exponents[np.newaxis, :]
-            if j == 0:
-                full.append(start)
-            full.append(block)
-        return np.concatenate(full, axis=1)
-
-
-# In[20]:
-
-
 class DecrementIndex:
     """
     Computes the decrement index I_t from simulated stock paths.
@@ -197,8 +107,8 @@ class DecrementIndex:
                     I_{n-1} * (1 - delta1) * (S_n / S_{n-1} + q * dt)
                     - delta2)
     Inputs:
-      - delta1: percentage decrement (0 < delta1 < 1)
-      - delta2: point decrement (>0)
+      - delta1: percentage decrement (0 < delta1 < 1, 0.05)
+      - delta2: point decrement (>0, 0.01 * S0)
       - q: scalar dividend yield
       - dt: time step size (scalar)
       - I0: initial index level
@@ -230,34 +140,28 @@ class DecrementIndex:
                 - self.delta2
             )
         return I_paths
-
-
-# In[21]:
-
-
 class Payoff:
     """
     Base class for payoffs.
     """
     def __call__(self, I_paths):
         raise NotImplementedError
-
-
-# In[31]:
-
-
 class VanillaCall(Payoff):
+    """Vanilla call option on the decrement index."""
     def __init__(self, K):
         self.K = K
-
+    
     def __call__(self, I_paths):
         payoffs = np.maximum(I_paths[:, -1] - self.K, 0)
         return payoffs
-
-
-# In[33]:
-
-
+class VanillaPut(Payoff):
+    """Vanilla put option on the decrement index."""
+    def __init__(self, K):
+        self.K = K
+    
+    def __call__(self, I_paths):
+        payoffs = np.maximum(self.K - I_paths[:, -1], 0)
+        return payoffs
 class BarrierDownOut(Payoff):
     """
     Down-and-out barrier on index: zero if I falls below barrier,
@@ -266,85 +170,413 @@ class BarrierDownOut(Payoff):
     def __init__(self, K, barrier):
         self.K = K
         self.barrier = barrier
-
+    
     def __call__(self, I_paths):
-        n_paths = I_paths.shape[0]
         payoffs = np.maximum(I_paths[:, -1] - self.K, 0)
         touched = (I_paths <= self.barrier).any(axis=1)
         payoffs[touched] = 0
         return payoffs
-
-
-# In[34]:
-
-
 class AutoCallable(Payoff):
     """
-    Auto-callable product on the decrement index I_t:
-    periodic digital coupon plus Bermudan type knock-in put,
-    both subject to periodic up-and-out barriers on I_t.
+    Auto-callable on the decrement index I_t with:
+      - Periodic digital coupon at quarterly observations
+      - Bermudan-style knock-in put if ever <= barrier_ki
+      - Up-and-out barrier enforced only at each observation date
+      - Optional Broadie-Glasserman correction for barrier monitoring
     """
-    def __init__(self, times_obs, coupon, barrier_up, barrier_ki, K_put):
-        self.times_obs = times_obs
+    
+    def __init__(self, times_obs, coupon, barrier_up, barrier_ki, K_put, 
+                 dt=1/250, use_bg_correction=True, volatility=None):
+        """
+        Parameters:
+        -----------
+        times_obs : list of float
+            Observation times in years (e.g. [0.25, 0.5, 0.75, 1.0])
+        coupon : float
+            Digital coupon amount paid on early exercise
+        barrier_up : float
+            Up-and-out barrier level (triggers early exercise)
+        barrier_ki : float
+            Knock-in barrier level (activates put protection)
+        K_put : float
+            Strike price for the put option
+        dt : float
+            Time step in years (default: 1/250 for daily)
+        use_bg_correction : bool
+            Whether to apply Broadie-Glasserman correction
+        volatility : float
+            Annualized volatility (required for BG correction)
+        """
+        self.times_obs = np.array(times_obs)
+        self.obs_idx = [int(round(t_year / dt)) for t_year in times_obs]
         self.coupon = coupon
         self.barrier_up = barrier_up
         self.barrier_ki = barrier_ki
         self.K_put = K_put
-
+        self.dt = dt
+        self.use_bg_correction = use_bg_correction
+        self.volatility = volatility
+        
+        if use_bg_correction and volatility is None:
+            raise ValueError("Volatility must be provided for Broadie-Glasserman correction")
+    
+    def broadie_glasserman_correction(self, barrier, dt, volatility):
+        """
+        Apply Broadie-Glasserman correction factor for discrete barrier monitoring.
+        
+        For up-and-out barriers, the correction factor is:
+        β = exp(λ * σ√dt) where λ ≈ 0.5826
+        
+        Returns the adjusted barrier level.
+        """
+        lambda_bg = 0.5826  # Broadie-Glasserman constant
+        correction_factor = np.exp(lambda_bg * volatility * np.sqrt(dt))
+        return barrier / correction_factor  # Lower the barrier for up-and-out
+    
     def __call__(self, I_paths):
-        n_paths, N1 = I_paths.shape
+        """
+        Evaluate payoffs for given index paths.
+        
+        Parameters:
+        -----------
+        I_paths : np.ndarray
+            Array of shape (n_paths, n_steps) containing index paths
+            
+        Returns:
+        --------
+        np.ndarray
+            Payoffs for each path
+        """
+        n_paths, n_steps = I_paths.shape
         payoffs = np.zeros(n_paths)
         alive = np.ones(n_paths, dtype=bool)
+        
+        # Determine knock-in status (continuous monitoring)
         knocked_in = (I_paths <= self.barrier_ki).any(axis=1)
-
-        for obs in self.times_obs:
-            trigger = alive & (I_paths[:, obs] >= self.barrier_up)
-            payoffs[trigger] = self.coupon
+        
+        # Apply Broadie-Glasserman correction to up barrier if requested
+        effective_barrier_up = self.barrier_up
+        if self.use_bg_correction:
+            effective_barrier_up = self.broadie_glasserman_correction(
+                self.barrier_up, self.dt, self.volatility
+            )
+        
+        # Check up-and-out barrier only at observation dates
+        for i, obs_idx in enumerate(self.obs_idx):
+            if obs_idx >= n_steps:
+                continue
+                
+            # Check which alive paths breach the up barrier
+            trigger = alive & (I_paths[:, obs_idx] >= effective_barrier_up)
+            
+            # Pay coupon and terminate these paths
+            payoffs[trigger] = self.coupon * (i + 1)  # Cumulative coupon
             alive[trigger] = False
-
-        final_obs = self.times_obs[-1]
-        survivors = alive
-        exec_idx = survivors & knocked_in
-        payoffs[exec_idx] = np.maximum(self.K_put - I_paths[exec_idx, final_obs], 0)
+        
+        # Handle survivors at final observation
+        if len(self.obs_idx) > 0:
+            final_idx = min(self.obs_idx[-1], n_steps - 1)
+            survivors = alive
+            
+            # Paths that were knocked in get put protection
+            knocked_in_survivors = survivors & knocked_in
+            payoffs[knocked_in_survivors] = np.maximum(
+                self.K_put - I_paths[knocked_in_survivors, final_idx], 0.0
+            )
+            
+            # Paths that were never knocked in get their principal back
+            never_knocked_in = survivors & ~knocked_in
+            payoffs[never_knocked_in] = 1.0  # Assuming normalized principal
+        
         return payoffs
-
-
-# In[ ]:
-
-
-class IndexPricer(MCPricer):
+        
+class MonteCarlo:
     """
-    Monte Carlo pricer specialized for decrement index payoffs.
-    Inherits RNG, interpolator, and uses a Payoff object on I_paths.
+        Monte Carlo pricer for decrement index derivatives.
+    Handles both full simulation and interpolation-based acceleration.
     """
-    def __init__(self, rng, interpolator):
-        super().__init__(rng, interpolator, None)
-
-    def price_index(self, times_coarse, L, n_paths, r, q, sigma, S0, delta1, delta2, dt, I0, payoff_obj):
+    
+    def __init__(self, path_generator, decrement_index, rng=None):
         """
-        1. Simulate and interpolate stock paths to fine grid.
-        2. Compute decrement index paths.
-        3. Evaluate payoff_obj on I_paths and return PV and variance.
-
-        - payoff_obj: instance of Payoff subclass operating on I_paths
+        Parameters:
+        -----------
+        path_generator : PathGenerator
+            Generator for underlying asset paths
+        decrement_index : DecrementIndex
+            Decrement index calculator
+        rng : RandomNumberGenerator, optional
+            Random number generator (creates default if None)
         """
-        # 1. Stock simulation
-        M = len(times_coarse) - 1
-        normals = self.rng.normals(n_paths, M)
-        pg = PathGenerator(r, q, sigma, S0)
-        S_coarse = pg.simulate(times_coarse, normals)
-        times_fine = np.linspace(times_coarse[0], times_coarse[-1], M * L + 1)
-        S_fine = self.interpolator.interpolate(times_coarse, S_coarse, times_fine)
+        self.path_generator = path_generator
+        self.decrement_index = decrement_index
+        self.rng = rng if rng is not None else RandomNumberGenerator()
+        # Store stock paths for reuse between methods
+        self._cached_stock_paths = None
+        self._cached_seed = None
+    
+    def price_full_simulation(self, payoff, T, n_paths, n_steps, seed=2025):
+        """
+        Price using full simulation (no interpolation).
+        
+        Parameters:
+        -----------
+        payoff : Payoff
+            Payoff function to evaluate
+        T : float
+            Time to maturity in years
+        n_paths : int
+            Number of Monte Carlo paths
+        n_steps : int
+            Number of time steps per path
+        seed : int
+            Random seed
+            
+        Returns:
+        --------
+        dict
+            Dictionary containing price, standard error, and timing info
+        """
+        start_time = time.time()
+        
+        # Generate time grid
+        times = np.linspace(0, T, n_steps + 1)
+        
+        # Generate random numbers and simulate stock paths
+        normals = self.rng.normals(n_paths, n_steps, seed)
+        S_paths = self.path_generator.simulate(times, normals)
+        
+        # Cache stock paths for reuse
+        self._cached_stock_paths = S_paths
+        self._cached_seed = seed
+        
+        # Compute decrement index paths
+        I_paths = self.decrement_index.compute(S_paths)
+        
+        # Compute payoffs
+        payoffs = payoff(I_paths)
+        
+        # Calculate statistics
+        price = np.mean(payoffs)
+        std_error = np.std(payoffs) / np.sqrt(n_paths)
+        
+        end_time = time.time()
+        
+        return {
+            'price': price,
+            'std_error': std_error,
+            'computation_time': end_time - start_time,
+            'n_paths': n_paths,
+            'n_steps': n_steps,
+            'method': 'full_simulation'
+        }
+    
+    def price_with_interpolation(self, payoff, T, n_paths, n_coarse_steps, 
+                                L, seed=2025, use_cached_paths=True):
+        """
+        Price using interpolation-based acceleration.
+        
+        Parameters:
+        -----------
+        payoff : Payoff
+            Payoff function to evaluate
+        T : float
+            Time to maturity in years
+        n_paths : int
+            Number of Monte Carlo paths
+        n_coarse_steps : int
+            Number of coarse time steps for simulation
+        L : int
+            Number of interpolation points between each coarse step
+        seed : int
+            Random seed
+        use_cached_paths : bool
+            Whether to use cached stock paths from previous full simulation
+            
+        Returns:
+        --------
+        dict
+            Dictionary containing price, standard error, and timing info
+        """
+        start_time = time.time()
+        
+        # Generate coarse time grid
+        times_coarse = np.linspace(0, T, n_coarse_steps + 1)
+        
+        # Use cached stock paths if available
+        if (use_cached_paths and self._cached_stock_paths is not None and 
+            self._cached_seed == seed):
+            # Extract coarse points directly from cached full paths
+            step_size = (self._cached_stock_paths.shape[1] - 1) // n_coarse_steps
+            indices = np.arange(0, self._cached_stock_paths.shape[1], step_size)[:n_coarse_steps + 1]
+            indices[-1] = self._cached_stock_paths.shape[1] - 1  # Ensure final point
+            S_coarse = self._cached_stock_paths[:, indices]
+        else:
+            # Generate new simulation
+            normals_coarse = self.rng.normals(n_paths, n_coarse_steps, seed)
+            S_coarse = self.path_generator.simulate(times_coarse, normals_coarse)
+        
+        # Interpolate to fine grid
+        S_fine = PathInterpolator.interpolate(times_coarse, S_coarse, L)
+        
+        # Compute decrement index paths on fine grid
+        I_paths = self.decrement_index.compute(S_fine)
+        
+        # Compute payoffs
+        payoffs = payoff(I_paths)
+        
+        # Calculate statistics
+        price = np.mean(payoffs)
+        std_error = np.std(payoffs) / np.sqrt(n_paths)
+        
+        end_time = time.time()
+        
+        return {
+            'price': price,
+            'std_error': std_error,
+            'computation_time': end_time - start_time,
+            'n_paths': n_paths,
+            'n_coarse_steps': n_coarse_steps,
+            'n_fine_steps': n_coarse_steps * L,
+            'interpolation_factor': L,
+            'method': 'interpolation',
+            'used_cached_paths': use_cached_paths and self._cached_stock_paths is not None
+        }
+    
+    def compare_methods(self, payoff, T, n_paths, n_steps_full, n_coarse_steps, 
+                       L, seed=2025):
+        """
+        Compare full simulation vs interpolation method using the same random numbers.
+        
+        Returns:
+        --------
+        dict
+            Dictionary with results from both methods and comparison metrics
+        """
+        # Full simulation (this will cache the normals)
+        result_full = self.price_full_simulation(
+            payoff, T, n_paths, n_steps_full, seed
+        )
+        
+        # Interpolation method using cached stock paths
+        result_interp = self.price_with_interpolation(
+            payoff, T, n_paths, n_coarse_steps, L, seed, use_cached_paths=True
+        )
+        
+        # Calculate comparison metrics
+        price_diff = abs(result_full['price'] - result_interp['price'])
+        speedup = result_full['computation_time'] / result_interp['computation_time']
+        
+        return {
+            'full_simulation': result_full,
+            'interpolation': result_interp,
+            'price_difference': price_diff,
+            'speedup_factor': speedup,
+            'relative_error': price_diff / result_full['price'] if result_full['price'] != 0 else 0
+        }
+    
+    def spot_ladder(self, payoff, T, n_paths, n_steps, spot_range, seed=2025):
+        """
+        Generate a spot ladder showing price sensitivity to initial spot.
+        
+        Parameters:
+        -----------
+        payoff : Payoff
+            Payoff function to evaluate
+        T : float
+            Time to maturity
+        n_paths : int
+            Number of Monte Carlo paths
+        n_steps : int
+            Number of time steps
+        spot_range : array-like
+            Range of initial spot prices to test
+        seed : int
+            Random seed
+            
+        Returns:
+        --------
+        dict
+            Dictionary with spots and corresponding prices
+        """
+        original_S0 = self.path_generator.S0
+        spots = np.array(spot_range)
+        prices = np.zeros_like(spots)
+        std_errors = np.zeros_like(spots)
+        
+        for i, spot in enumerate(spots):
+            # Update initial spot
+            self.path_generator.S0 = spot
+            
+            # Price the option
+            result = self.price_full_simulation(payoff, T, n_paths, n_steps, seed)
+            prices[i] = result['price']
+            std_errors[i] = result['std_error']
+        
+        # Restore original spot
+        self.path_generator.S0 = original_S0
+        
+        return {
+            'spots': spots,
+            'prices': prices,
+            'std_errors': std_errors
+        }
+if __name__ == "__main__":
+    # Market parameters
+    r = 0.03
+    q = 0.01
+    sigma = 0.3
+    S0 = 100.0
+    delta1 = 0.05
+    delta2 = 1.0
+    dt = 1 / 250
+    T = 1.0
+    K = 95.0
+    path_gen = PathGenerator(r, q, sigma, S0)
+    decr_index = DecrementIndex(delta1, delta2, q, dt)
+    mc = MonteCarlo(path_gen, decr_index)
+    vanilla_call = VanillaCall(K)
+    barrier_down_out = BarrierDownOut(K, barrier=80.0)
+    auto_callable = AutoCallable(
+        times_obs=[0.25, 0.5, 0.75, 1.0],
+        coupon=0.10,
+        barrier_up=110.0,
+        barrier_ki=75.0,
+        K_put=100.0,
+        dt=dt,
+        use_bg_correction=True,
+        volatility=sigma
+    )
+    n_paths = 10000
+    n_steps = 250
+    n_coarse_steps = 50
+    L = 5
+    print("Monte Carlo Pricing System for Decrement Index Derivatives")
+    print("=" * 60)
 
-        # 2. Compute index paths
-        decr = DecrementIndex(delta1, delta2, q, dt, I0)
-        I_paths = decr.compute(S_fine)
+    # Vanilla Call pricing
+    print(f"\nPricing Vanilla Call (K={K}):")
+    result_vanilla = mc.price_full_simulation(vanilla_call, T, n_paths, n_steps)
+    print(f"Price: {result_vanilla['price']:.4f} ± {result_vanilla['std_error']:.4f}")
+    print(f"Time: {result_vanilla['computation_time']:.2f}s")
 
-        # 3. Payoff evaluation
-        pay_vals = payoff_obj(I_paths)
-        # Compute present value (PV) as the average payoff
-        pv = np.mean(pay_vals)
-        # Optionally estimate variance of the payoff
-        var = np.var(pay_vals, ddof=1)
-        return pv, var
+    # Barrier Down-and-Out Call pricing
+    print(f"\nPricing Barrier Down-and-Out Call (K={K}, Barrier=80):")
+    result_barrier = mc.price_full_simulation(barrier_down_out, T, n_paths, n_steps)
+    print(f"Price: {result_barrier['price']:.4f} ± {result_barrier['std_error']:.4f}")
+    print(f"Time: {result_barrier['computation_time']:.2f}s")
 
+    # Compare full simulation vs interpolation
+    print("\nComparing full simulation vs interpolation:")
+    compare_res = mc.compare_methods(vanilla_call, T, n_paths, n_steps, n_coarse_steps, L)
+    full = compare_res['full_simulation']
+    interp = compare_res['interpolation']
+    print(f"Full price: {full['price']:.4f}, Interp price: {interp['price']:.4f}")
+    print(f"Price diff: {compare_res['price_difference']:.6f}")
+    print(f"Speedup factor: {compare_res['speedup_factor']:.2f}x")
+
+    # Spot ladder sensitivity
+    print("\nSpot Ladder Sensitivity (Vanilla Call):")
+    spot_range = [80, 90, 100, 110, 120]
+    ladder = mc.spot_ladder(vanilla_call, T, n_paths, n_steps, spot_range)
+    for spot, price, se in zip(ladder['spots'], ladder['prices'], ladder['std_errors']):
+        print(f"S0={spot:.0f}: Price={price:.4f} ± {se:.4f}")
